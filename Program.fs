@@ -1,6 +1,5 @@
 ﻿open Docker.DotNet
 open System
-open Docker.DotNet.Models
 open System.Threading
 open Fumble
 open Microsoft.AspNetCore.Builder
@@ -8,8 +7,6 @@ open Microsoft.AspNetCore.Hosting
 open Microsoft.Extensions.Hosting
 open Microsoft.Extensions.DependencyInjection
 open Giraffe
-
-open ContainerStreaming
 
 let sqliteConnectionString = "Data Source=containers.db"
 
@@ -35,21 +32,30 @@ module Database =
               Image = read.string "image"
               Command = read.string "command" })
 
+    let getDesiredStateByName name =
+        sqliteConnectionString
+        |> Sql.connect
+        |> Sql.query "SELECT * FROM DesiredContainerState WHERE name = @name"
+        |> Sql.parameters [ "@name", Sql.string name ]
+        |> Sql.execute (fun read ->
+            { Id = read.stringOrNone "id"
+              Name = read.string "name"
+              Image = read.string "image"
+              Command = read.string "command" })
+
     let saveDesiredState (state: CreateContainerReq) =
+        sqliteConnectionString
+        |> Sql.connect
+        |> Sql.query "INSERT INTO DesiredContainerState (name, image, command) VALUES (@name, @image, @command)"
+        |> Sql.parameters
+            [ "@name", Sql.string state.Name
+              "@image", Sql.string state.Image
+              "@command", Sql.string state.Command ]
+        |> Sql.executeNonQuery
 
-        let insert =
-            sqliteConnectionString
-            |> Sql.connect
-            |> Sql.query "INSERT INTO DesiredContainerState (name, image, command) VALUES (@name, @image, @command)"
-            |> Sql.parameters
-                [ "@name", Sql.string state.Name
-                  "@image", Sql.string state.Image
-                  "@command", Sql.string state.Command ]
-            |> Sql.executeNonQuery
+type ContainerServiceError = ServiceError of string
 
-        match insert with
-        | Ok _ -> ()
-        | Error e -> failwith e.Message
+let unwrapServiceError (ServiceError e) = e
 
 
 type ContainerService() =
@@ -61,12 +67,19 @@ type ContainerService() =
 
             if acquired then
                 try
-                    printfn "Creating container %s" container.Name
+                    let existing = Database.getDesiredStateByName container.Name
 
-                    Database.saveDesiredState
-                        { Name = container.Name
-                          Image = container.Image
-                          Command = container.Command }
+                    match existing with
+                    | Ok x -> return Error(ServiceError "Container already exists")
+                    | _ ->
+                        printfn "Creating container %s" container.Name
+                        let result = Database.saveDesiredState container
+
+                        return
+                            match result with
+                            | Ok x -> Ok container
+                            | Error e -> Error(ServiceError e.Message)
+
                 finally
                     printfn "Releasing lock"
                     let count = cs.lock.Release()
@@ -74,6 +87,7 @@ type ContainerService() =
                     printfn "Released lock: %d" count
             else
                 printfn "Failed to acquire lock"
+                return Error(ServiceError "Failed to acquire lock")
         }
 
 let ctks = new CancellationTokenSource()
@@ -92,9 +106,13 @@ let containerCreateHandler =
               Image = "nginx"
               Command = "echo 'Hello, World!'" }
 
-        container |> cs.CreateContainer |> Async.RunSynchronously
+        let result = container |> cs.CreateContainer |> Async.RunSynchronously
 
-        ctx.WriteJsonAsync container)
+        match result with
+        | Ok c -> ctx.WriteJsonAsync c
+        | Error e ->
+            ctx.SetStatusCode 500
+            ctx.WriteJsonAsync(e |> unwrapServiceError))
 
 let containerGetHandler =
     handleContext (fun ctx ->
@@ -106,16 +124,12 @@ let containerGetHandler =
 
 let webApp =
     choose
-        [ route "/ping" >=> text "pong"
-          POST >=> choose [ route "/container" >=> containerCreateHandler ]
-          GET >=> choose [ route "/container" >=> containerGetHandler ]
-          route "/" >=> htmlFile "/pages/index.html" ]
+        [ POST >=> choose [ route "/container" >=> containerCreateHandler ]
+          GET >=> choose [ route "/container" >=> containerGetHandler ] ]
 
 let configureApp (app: IApplicationBuilder) = app.UseGiraffe webApp
 
-let configureServices (services: IServiceCollection) =
-    // Add Giraffe dependencies
-    services.AddGiraffe() |> ignore
+let configureServices (services: IServiceCollection) = services.AddGiraffe() |> ignore
 
 [<EntryPoint>]
 let main _ =
