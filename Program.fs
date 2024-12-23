@@ -11,6 +11,8 @@ open Giraffe
 let sqliteConnectionString = "Data Source=containers.db"
 
 module Database =
+
+    [<CLIMutable>]
     type CreateContainerReq =
         { Image: string
           Name: string
@@ -22,7 +24,7 @@ module Database =
           Image: string
           Command: string }
 
-    let getDesiredState =
+    let getDesiredState () =
         sqliteConnectionString
         |> Sql.connect
         |> Sql.query "SELECT * FROM DesiredContainerState"
@@ -55,7 +57,7 @@ module Database =
 
 type ContainerServiceError = ServiceError of string
 
-let unwrapServiceError (ServiceError e) = e
+let unwrapServiceError (ServiceError e) = "ServiceError(" + e + ")"
 
 
 type ContainerService() =
@@ -70,7 +72,7 @@ type ContainerService() =
                     let existing = Database.getDesiredStateByName container.Name
 
                     match existing with
-                    | Ok x -> return Error(ServiceError "Container already exists")
+                    | Ok x when x.Length > 0 -> return Error(ServiceError "Container already exists")
                     | _ ->
                         printfn "Creating container %s" container.Name
                         let result = Database.saveDesiredState container
@@ -101,10 +103,13 @@ let cs = ContainerService()
 
 let containerCreateHandler =
     handleContext (fun ctx ->
-        let container: Database.CreateContainerReq =
-            { Name = "test"
-              Image = "nginx"
-              Command = "echo 'Hello, World!'" }
+        let container =
+            ctx.BindJsonAsync<Database.CreateContainerReq>()
+            |> Async.AwaitTask
+            |> Async.RunSynchronously
+
+        printfn "Creating container %A" container
+
 
         let result = container |> cs.CreateContainer |> Async.RunSynchronously
 
@@ -116,7 +121,7 @@ let containerCreateHandler =
 
 let containerGetHandler =
     handleContext (fun ctx ->
-        let result = Database.getDesiredState
+        let result = Database.getDesiredState ()
 
         match result with
         | Ok state -> ctx.WriteJsonAsync state
@@ -129,7 +134,11 @@ let webApp =
 
 let configureApp (app: IApplicationBuilder) = app.UseGiraffe webApp
 
-let configureServices (services: IServiceCollection) = services.AddGiraffe() |> ignore
+let configureServices (services: IServiceCollection) =
+    services.AddGiraffe() |> ignore
+
+    services.AddSingleton<Json.ISerializer>(Json.Serializer(Json.Serializer.DefaultOptions))
+    |> ignore
 
 [<EntryPoint>]
 let main _ =
