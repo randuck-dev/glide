@@ -14,6 +14,11 @@ open ContainerStreaming
 let sqliteConnectionString = "Data Source=containers.db"
 
 module Database =
+    type CreateContainerReq =
+        { Image: string
+          Name: string
+          Command: string }
+
     type DesiredContainerState =
         { Id: string option
           Name: string
@@ -30,7 +35,7 @@ module Database =
               Image = read.string "image"
               Command = read.string "command" })
 
-    let saveDesiredState state =
+    let saveDesiredState (state: CreateContainerReq) =
 
         let insert =
             sqliteConnectionString
@@ -47,11 +52,10 @@ module Database =
         | Error e -> failwith e.Message
 
 
-
 type ContainerService() =
     member _.lock: SemaphoreSlim = new SemaphoreSlim(1)
 
-    member cs.CreateContainer container =
+    member cs.CreateContainer(container: Database.CreateContainerReq) =
         async {
             let! acquired = (cs.lock.WaitAsync(100)) |> Async.AwaitTask
 
@@ -60,10 +64,9 @@ type ContainerService() =
                     printfn "Creating container %s" container.Name
 
                     Database.saveDesiredState
-                        { Id = None
-                          Name = container.Name
-                          Image = "alpine"
-                          Command = "echo 'Hello, World!'" }
+                        { Name = container.Name
+                          Image = container.Image
+                          Command = container.Command }
                 finally
                     printfn "Releasing lock"
                     let count = cs.lock.Release()
@@ -84,10 +87,10 @@ let cs = ContainerService()
 
 let containerCreateHandler =
     handleContext (fun ctx ->
-        let container =
+        let container: Database.CreateContainerReq =
             { Name = "test"
-              ID = "123"
-              Status = "Started" }
+              Image = "nginx"
+              Command = "echo 'Hello, World!'" }
 
         container |> cs.CreateContainer |> Async.RunSynchronously
 
