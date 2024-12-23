@@ -9,12 +9,13 @@ open Microsoft.Extensions.Hosting
 open Microsoft.Extensions.DependencyInjection
 open Giraffe
 
+open ContainerStreaming
 
 let sqliteConnectionString = "Data Source=containers.db"
 
 module Database =
     type DesiredContainerState =
-        { Id: string
+        { Id: string option
           Name: string
           Image: string
           Command: string }
@@ -24,79 +25,87 @@ module Database =
         |> Sql.connect
         |> Sql.query "SELECT * FROM DesiredContainerState"
         |> Sql.execute (fun read ->
-            { Id = read.string "id"
+            { Id = read.stringOrNone "id"
               Name = read.string "name"
               Image = read.string "image"
               Command = read.string "command" })
 
+    let saveDesiredState state =
 
+        let insert =
+            sqliteConnectionString
+            |> Sql.connect
+            |> Sql.query "INSERT INTO DesiredContainerState (name, image, command) VALUES (@name, @image, @command)"
+            |> Sql.parameters
+                [ "@name", Sql.string state.Name
+                  "@image", Sql.string state.Image
+                  "@command", Sql.string state.Command ]
+            |> Sql.executeNonQuery
+
+        match insert with
+        | Ok _ -> ()
+        | Error e -> failwith e.Message
+
+
+
+type ContainerService() =
+    member _.lock: SemaphoreSlim = new SemaphoreSlim(1)
+
+    member cs.CreateContainer container =
+        async {
+            let! acquired = (cs.lock.WaitAsync(100)) |> Async.AwaitTask
+
+            if acquired then
+                try
+                    printfn "Creating container %s" container.Name
+
+                    Database.saveDesiredState
+                        { Id = None
+                          Name = container.Name
+                          Image = "alpine"
+                          Command = "echo 'Hello, World!'" }
+                finally
+                    printfn "Releasing lock"
+                    let count = cs.lock.Release()
+
+                    printfn "Released lock: %d" count
+            else
+                printfn "Failed to acquire lock"
+        }
+
+let ctks = new CancellationTokenSource()
 
 let client =
     (new DockerClientConfiguration(Uri("unix:///var/run/docker.sock")))
         .CreateClient()
 
-let token = new CancellationTokenSource()
-
-
-type Container =
-    { ID: string
-      Name: string
-      Status: string }
-
-module ContainerStreaming =
-    type ProgressMessage =
-        { ID: string
-          Action: string
-          Status: string
-          Actor: string
-          Scope: string }
-
-    let mutable state = Map.empty<string, Container>
-
-    let progressHandler (client: DockerClient) =
-        let messageHandler (message: Message) =
-            let pm =
-                { ID = message.ID
-                  Action = message.Action
-                  Actor = message.Actor.ID
-                  Scope = message.Scope
-                  Status = message.Status }
-
-            match pm.Action with
-            | "start" ->
-                let containerInspection =
-                    client.Containers.InspectContainerAsync(pm.ID)
-                    |> Async.AwaitTask
-                    |> Async.RunSynchronously
-
-                let container =
-                    { ID = pm.ID
-                      Name = containerInspection.Name
-                      Status = containerInspection.State.Status }
-
-                state <- state.Add(pm.ID, container)
-
-            | _ -> printfn "Unable to handle event type %s" pm.Action
-
-        messageHandler
-
-
-    let listen_to_changes (client: DockerClient) ctk =
-        let progress = Progress<Message>(progressHandler (client)) :> IProgress<Message>
-
-        client.System.MonitorEventsAsync(ContainerEventsParameters(), progress, ctk)
-        |> Async.AwaitTask
-        |> Async.Start
-
-let ctks = new CancellationTokenSource()
-
 ContainerStreaming.listen_to_changes client ctks.Token
+let cs = ContainerService()
 
+let containerCreateHandler =
+    handleContext (fun ctx ->
+        let container =
+            { Name = "test"
+              ID = "123"
+              Status = "Started" }
+
+        container |> cs.CreateContainer |> Async.RunSynchronously
+
+        ctx.WriteJsonAsync container)
+
+let containerGetHandler =
+    handleContext (fun ctx ->
+        let result = Database.getDesiredState
+
+        match result with
+        | Ok state -> ctx.WriteJsonAsync state
+        | Error e -> ctx.WriteJsonAsync e.Message)
 
 let webApp =
     choose
         [ route "/ping" >=> text "pong"
-          POST >=> choose [ route "/container" >=> json "hello" ]
+          POST >=> choose [ route "/container" >=> containerCreateHandler ]
+          GET >=> choose [ route "/container" >=> containerGetHandler ]
           route "/" >=> htmlFile "/pages/index.html" ]
 
 let configureApp (app: IApplicationBuilder) = app.UseGiraffe webApp
