@@ -53,6 +53,8 @@ let toContainerAction str =
     | "create" -> Ok Create
     | "destroy" -> Ok Destroy
     | "die" -> Ok Die
+    | "stop" -> Ok Stop
+    | "kill" -> Ok Kill
     | _ -> Error("Unknown action: " + str)
 
 let toContainerState str =
@@ -95,7 +97,7 @@ let dockerEventProgressHandler (client: DockerClient) =
         | Error e -> printfn "%s" e
 
     let handleDestroyAction pm =
-        printfn "Removing container %A" pm.ID
+        printfn "Container remove: %A" pm.ID
 
         let c = state.Values |> Seq.tryFind (fun x -> x.ID = pm.ID)
 
@@ -105,6 +107,8 @@ let dockerEventProgressHandler (client: DockerClient) =
             | (true, v) -> printfn "Removed container %A" c.Name
             | (false, v) -> printfn "Failed to remove container %A" c.Name
         | None -> printfn "Container not found: %s" pm.ID
+
+    let handleStopAction pm = printfn "Container stopped: %A" pm.ID
 
     let messageHandler (message: Message) =
         let messageType = toMessage message.Type
@@ -126,9 +130,9 @@ let dockerEventProgressHandler (client: DockerClient) =
                 | Start -> handleStartAction pm
                 | Create -> handleStartAction pm
                 | Destroy -> handleDestroyAction pm
-                | Die -> printfn "Container %s has died" pm.ID
-                | Kill -> printfn "Container %s has been killed" pm.ID
-                | Stop -> printfn "Container %s has been stopped" pm.ID
+                | Die -> printfn "Container died %s" pm.ID
+                | Kill -> printfn "Container killed %s" pm.ID
+                | Stop -> handleStopAction pm
             | Error e -> printfn "%s" e
         | Ok Network -> printfn "Not supporting network messages for now: Action<%s>" message.Action
         | Error e -> printfn "%s" e
