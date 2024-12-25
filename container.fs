@@ -12,15 +12,14 @@ type ContainerState =
     | Running
     | Exited
 
-
 module ContainerName =
-    type ContainerName = ContainerName of string
+    type ContainerName = private ValidatedContainerName of string
 
-    let Create (name: string) =
+    let create (name: string) =
         let n = name.Replace("/", "")
-        ContainerName n
+        ValidatedContainerName n
 
-    let Unwrap (ContainerName n) = n
+    let unwrap (ValidatedContainerName n) = n
 
 type Container =
     { ID: string
@@ -34,9 +33,12 @@ type ContainerAction =
     | Create
     | Destroy
     | Kill
-    | Disconnect
     | Stop
     | Die
+
+type MessageType =
+    | Container
+    | Network
 
 type ProgressMessage =
     { ID: string
@@ -60,12 +62,20 @@ let toContainerState str =
     | "exited" -> Ok Exited
     | _ -> Error("Unknown state: " + str)
 
+let toMessage str =
+    match str with
+    | "container" -> Ok Container
+    | "network" -> Ok Network
+    | _ -> Error("Unknown message type: " + str)
+
 
 let mutable state = ConcurrentDictionary<ContainerName.ContainerName, Container>()
 
 let dockerEventProgressHandler (client: DockerClient) =
 
     let handleStartAction pm =
+        printfn "Container started: %A" pm.ID
+
         let containerInspection =
             client.Containers.InspectContainerAsync(pm.ID)
             |> Async.AwaitTask
@@ -77,16 +87,15 @@ let dockerEventProgressHandler (client: DockerClient) =
         | Ok res ->
             let container =
                 { ID = pm.ID
-                  Name = ContainerName.Create containerInspection.Name
+                  Name = ContainerName.create containerInspection.Name
                   Image = containerInspection.Image
                   Status = res }
 
-            printfn "%A" container
             state.TryAdd(container.Name, container) |> ignore
         | Error e -> printfn "%s" e
 
     let handleDestroyAction pm =
-        printfn "Removing container %A" pm
+        printfn "Removing container %A" pm.ID
 
         let c = state.Values |> Seq.tryFind (fun x -> x.ID = pm.ID)
 
@@ -98,25 +107,30 @@ let dockerEventProgressHandler (client: DockerClient) =
         | None -> printfn "Container not found: %s" pm.ID
 
     let messageHandler (message: Message) =
-        let convertedAction = toContainerAction message.Action
+        let messageType = toMessage message.Type
 
-        match convertedAction with
-        | Ok x ->
-            let pm =
-                { ID = message.ID
-                  Action = x
-                  Actor = message.Actor.ID
-                  Scope = message.Scope
-                  Status = message.Status }
+        match messageType with
+        | Ok Container ->
+            let containerAction = toContainerAction message.Action
 
-            match pm.Action with
-            | Start -> handleStartAction pm
-            | Create -> handleStartAction pm
-            | Destroy -> handleDestroyAction pm
-            | Die -> printfn "Container %s has died" pm.ID
-            | Disconnect -> printfn "Container %s has disconnected" pm.ID
-            | Kill -> printfn "Container %s has been killed" pm.ID
-            | Stop -> printfn "Container %s has been stopped" pm.ID
+            match containerAction with
+            | Ok x ->
+                let pm =
+                    { ID = message.ID
+                      Action = x
+                      Actor = message.Actor.ID
+                      Scope = message.Scope
+                      Status = message.Status }
+
+                match pm.Action with
+                | Start -> handleStartAction pm
+                | Create -> handleStartAction pm
+                | Destroy -> handleDestroyAction pm
+                | Die -> printfn "Container %s has died" pm.ID
+                | Kill -> printfn "Container %s has been killed" pm.ID
+                | Stop -> printfn "Container %s has been stopped" pm.ID
+            | Error e -> printfn "%s" e
+        | Ok Network -> printfn "Not supporting network messages for now: Action<%s>" message.Action
         | Error e -> printfn "%s" e
 
     messageHandler
@@ -140,7 +154,7 @@ let initState (client: DockerClient) ctk =
             match status with
             | Ok s ->
                 let c =
-                    { Name = ContainerName.Create container.Names.[0]
+                    { Name = ContainerName.create container.Names.[0]
                       Image = container.Image
                       Status = s
                       ID = container.ID }
@@ -163,7 +177,7 @@ let listen_to_changes (client: DockerClient) ctk =
 type ReconcileService(reconcileTime, client: DockerClient) =
     inherit BackgroundService()
 
-    override r.ExecuteAsync(ctk) =
+    override _.ExecuteAsync(ctk) =
         task {
             let interval = TimeSpan.FromMilliseconds reconcileTime
             let periodic = new System.Threading.PeriodicTimer(interval)
@@ -175,7 +189,7 @@ type ReconcileService(reconcileTime, client: DockerClient) =
                 match desiredState with
                 | Ok s ->
                     for ds in s do
-                        let name = ContainerName.Create ds.Name
+                        let name = ContainerName.create ds.Name
 
                         match state.ContainsKey(name) with
                         | true ->
@@ -183,19 +197,24 @@ type ReconcileService(reconcileTime, client: DockerClient) =
                             ()
                         | false ->
                             printfn "Did not find the desired container in the existing state: %A" name
-                            // create the container with the desired state
-                            let createContainer: CreateContainerParameters = new CreateContainerParameters()
+
                             let labels = new Dictionary<string, string>()
-                            labels.Add("glide:name", ContainerName.Unwrap name)
+                            labels.Add("glide:name", ContainerName.unwrap name)
                             labels.Add("orchestration_owner", "glide")
+
+                            let createContainer: CreateContainerParameters = new CreateContainerParameters()
                             createContainer.Name <- ds.Name
                             createContainer.Image <- ds.Image
-
                             createContainer.Labels <- labels
 
                             try
                                 let! res = client.Containers.CreateContainerAsync(createContainer, ctk)
-                                printfn "%A" res
+
+                                let! _ =
+                                    client.Containers.StartContainerAsync(res.ID, new ContainerStartParameters(), ctk)
+
+                                ()
+
                             with ex when ex.Message.Contains("Conflict") ->
                                 printfn "Container already exists"
 
