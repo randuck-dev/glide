@@ -41,6 +41,11 @@ type Container =
       Status: ContainerState }
 
 
+type ContainerType =
+    | ManagedContainer of Container
+    | UnmanagedContainer of Container
+
+
 type ContainerAction =
     | Start
     | Create
@@ -49,9 +54,11 @@ type ContainerAction =
     | Stop
     | Die
 
+
 type MessageType =
     | Container
     | Network
+
 
 type ProgressMessage =
     { ID: string
@@ -59,6 +66,7 @@ type ProgressMessage =
       Status: string
       Actor: string
       Scope: string }
+
 
 let toContainerAction str =
     match str with
@@ -84,14 +92,20 @@ let toMessage str =
     | _ -> Error("Unknown message type: " + str)
 
 
-type State = ConcurrentDictionary<ContainerName.ContainerName, Container>
+type State = ConcurrentDictionary<ContainerName.ContainerName, ContainerType>
 let state = State()
 
 
 let handleDestroyAction pm (state: State) =
     printfn "Container remove: %A" pm.ID
 
-    let c = state.Values |> Seq.tryFind (fun x -> x.ID = pm.ID)
+    let c =
+        state.Values
+        |> Seq.map (fun x ->
+            match x with
+            | ManagedContainer x -> x
+            | UnmanagedContainer x -> x)
+        |> Seq.tryFind (fun x -> x.ID = pm.ID)
 
     match c with
     | Some c ->
@@ -121,7 +135,14 @@ let updateState pm (state: State) (client: DockerClient) =
                   Image = containerInspection.Image
                   Status = res }
 
-            state.AddOrUpdate(containerName, container, (fun _ _ -> container)) |> ignore
+            let containerType =
+                match containerInspection.Config.Labels.TryGetValue "orchestration_owner" with
+                | (true, label) when label = "glide" -> ManagedContainer container
+                | _ -> UnmanagedContainer container
+
+
+            state.AddOrUpdate(containerName, containerType, (fun _ _ -> containerType))
+            |> ignore
         | Error e -> printfn "Container name create error: %s" e
     | Error e -> printfn "%s" e
 
@@ -184,7 +205,7 @@ let initializeStateOfTheSystem (client: DockerClient) ctk =
                           Status = s
                           ID = container.ID }
 
-                    state.TryAdd(c.Name, c) |> ignore
+                    state.TryAdd(c.Name, ManagedContainer c) |> ignore
                 | Error e -> printfn "%s" e
             | Error e -> printfn "%s" e
 
@@ -257,9 +278,15 @@ type ReconcileService(client: DockerClient, config: IConfiguration) =
 
                 let desiredState = Database.getDesiredState ()
                 // we make a copy explicitly
-                let state = new Dictionary<ContainerName.ContainerName, Container>(state)
+                let state = new Dictionary<ContainerName.ContainerName, ContainerType>(state)
 
-                let mutable danglingContainers = state.Values |> Seq.toList
+                let mutable danglingContainers =
+                    state.Values
+                    |> Seq.choose (fun x ->
+                        match x with
+                        | ManagedContainer c -> Some c
+                        | _ -> None)
+                    |> Seq.toList
 
                 match desiredState with
                 | Ok s ->

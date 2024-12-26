@@ -81,36 +81,34 @@ let configureServices (services: IServiceCollection) =
             let config =
                 sp.GetRequiredService<IConfiguration>().GetValue<string>("DockerSocket")
 
-            let client = (new DockerClientConfiguration(Uri(config))).CreateClient()
-
-            client)
+            match config with
+            | null -> failwith "DockerSocket configuration not found"
+            | value -> (new DockerClientConfiguration(Uri(value))).CreateClient())
         .AddHostedService<ReconcileService>()
-    |> ignore
-
-    services.AddSingleton<Json.ISerializer>(Json.Serializer(Json.Serializer.DefaultOptions))
     |> ignore
 
 [<EntryPoint>]
 let main _ =
-    let allowedRange = { From = Port 15000; To = Port 15999 }
-    let ctks = new CancellationTokenSource()
-    let builder = Host.CreateDefaultBuilder()
+    async {
+        let allowedRange = { From = Port 15000; To = Port 15999 }
+        let ctks = new CancellationTokenSource()
+        let builder = Host.CreateDefaultBuilder()
 
-    let app =
-        builder
-            .ConfigureWebHostDefaults(fun webHostBuilder ->
-                webHostBuilder.Configure(configureApp).ConfigureServices(configureServices)
-                |> ignore)
-            .Build()
+        let app =
+            builder
+                .ConfigureWebHostDefaults(fun webHostBuilder ->
+                    webHostBuilder.Configure(configureApp).ConfigureServices(configureServices)
+                    |> ignore)
+                .Build()
 
-    let client = app.Services.GetRequiredService<DockerClient>()
+        let client = app.Services.GetRequiredService<DockerClient>()
 
-    initializeStateOfTheSystem client ctks.Token
-    |> Async.AwaitTask
+        do! initializeStateOfTheSystem client ctks.Token |> Async.AwaitTask
+
+        listen_to_changes client ctks.Token
+
+        app.Run()
+        ctks.Cancel()
+        return 0
+    }
     |> Async.RunSynchronously
-
-    listen_to_changes client ctks.Token
-
-    app.Run()
-    ctks.Cancel()
-    0
