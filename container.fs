@@ -7,6 +7,14 @@ open Microsoft.Extensions.Hosting
 open System.Collections.Generic
 open System.Collections.Concurrent
 
+type Port = Port of int
+
+type AllowedPortRange =
+    { From: Port
+      To: Port }
+
+    member this.within port = port <= this.To && port >= this.From
+
 type ContainerState =
     | Created
     | Running
@@ -104,8 +112,8 @@ let dockerEventProgressHandler (client: DockerClient) =
         match c with
         | Some c ->
             match state.TryRemove(c.Name) with
-            | (true, v) -> printfn "Removed container %A" c.Name
-            | (false, v) -> printfn "Failed to remove container %A" c.Name
+            | (true, _) -> printfn "Removed container %A" c.Name
+            | (false, _) -> printfn "Failed to remove container %A" c.Name
         | None -> printfn "Container not found: %s" pm.ID
 
     let handleStopAction pm = printfn "Container stopped: %A" pm.ID
@@ -206,10 +214,23 @@ type ReconcileService(reconcileTime, client: DockerClient) =
                             labels.Add("glide:name", ContainerName.unwrap name)
                             labels.Add("orchestration_owner", "glide")
 
+                            let ports = Dictionary<string, EmptyStruct>()
+                            ports.Add(sprintf "%d/tcp" ds.HostPort, EmptyStruct())
+
+                            let hostConfig = HostConfig()
+                            let portBindings = new Dictionary<string, IList<PortBinding>>()
+                            let portBinding = PortBinding()
+                            portBinding.HostPort <- sprintf "%d" ds.HostPort
+                            portBindings.Add(sprintf "%d/tcp" ds.ContainerPort, [| portBinding |])
+
+                            hostConfig.PortBindings <- portBindings
+
                             let createContainer: CreateContainerParameters = new CreateContainerParameters()
                             createContainer.Name <- ds.Name
                             createContainer.Image <- ds.Image
                             createContainer.Labels <- labels
+                            createContainer.ExposedPorts <- ports
+                            createContainer.HostConfig <- hostConfig
 
                             try
                                 let! res = client.Containers.CreateContainerAsync(createContainer, ctk)

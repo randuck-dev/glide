@@ -10,13 +10,15 @@ open ContainerStreaming
 
 type ContainerServiceError = ServiceError of string
 
+type ContainerDto = Database.ContainerEntity
+
 let unwrapServiceError (ServiceError e) = "ServiceError(" + e + ")"
 
 
 type ContainerService() =
     member _.lock: SemaphoreSlim = new SemaphoreSlim(1)
 
-    member cs.CreateContainer(container: Database.CreateContainerReq) =
+    member cs.CreateContainer(container: ContainerDto) =
         async {
             let! acquired = (cs.lock.WaitAsync(100)) |> Async.AwaitTask
 
@@ -31,7 +33,7 @@ type ContainerService() =
 
                         return
                             match result with
-                            | Ok x -> Ok container
+                            | Ok _ -> Ok container
                             | Error e -> Error(ServiceError e.Message)
 
                 finally
@@ -50,13 +52,12 @@ let client =
         .CreateClient()
 
 let cs = ContainerService()
+let allowedRange = { From = Port 15000; To = Port 15999 }
 
 let containerCreateHandler =
     handleContext (fun ctx ->
         let container =
-            ctx.BindJsonAsync<Database.CreateContainerReq>()
-            |> Async.AwaitTask
-            |> Async.RunSynchronously
+            ctx.BindJsonAsync<ContainerDto>() |> Async.AwaitTask |> Async.RunSynchronously
 
         printfn "Creating container %A" container
 

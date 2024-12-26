@@ -5,17 +5,20 @@ open Fumble
 let sqliteConnectionString = "Data Source=containers.db"
 
 
-[<CLIMutable>]
-type CreateContainerReq =
+type ContainerEntity =
     { Image: string
       Name: string
-      Command: string }
+      Command: string
+      HostPort: int
+      ContainerPort: int }
 
 type DesiredContainerState =
     { Id: string option
       Name: string
       Image: string
-      Command: string }
+      Command: string
+      HostPort: int
+      ContainerPort: int }
 
 let getDesiredState () =
     sqliteConnectionString
@@ -25,7 +28,9 @@ let getDesiredState () =
         { Id = read.stringOrNone "id"
           Name = read.string "name"
           Image = read.string "image"
-          Command = read.string "command" })
+          Command = read.string "command"
+          HostPort = read.int "host_port"
+          ContainerPort = read.int "container_port" })
 
 let getDesiredStateByName name =
     sqliteConnectionString
@@ -36,14 +41,19 @@ let getDesiredStateByName name =
         { Id = read.stringOrNone "id"
           Name = read.string "name"
           Image = read.string "image"
-          Command = read.string "command" })
+          Command = read.string "command"
+          HostPort = read.int "host_port"
+          ContainerPort = read.int "container_port" })
 
-let saveDesiredState (state: CreateContainerReq) =
+let saveDesiredState (state: ContainerEntity) =
     sqliteConnectionString
     |> Sql.connect
-    |> Sql.query "INSERT INTO DesiredContainerState (name, image, command) VALUES (@name, @image, @command)"
+    |> Sql.query
+        "INSERT INTO DesiredContainerState (name, image, command, container_port, host_port) VALUES (@name, @image, @command, @containerPort, @hostPort)"
     |> Sql.parameters
         [ "@name", Sql.string state.Name
           "@image", Sql.string state.Image
-          "@command", Sql.string state.Command ]
+          "@command", Sql.string state.Command
+          "@containerPort", Sql.int state.ContainerPort
+          "@hostPort", Sql.int state.HostPort ]
     |> Sql.executeNonQuery
