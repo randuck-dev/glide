@@ -7,13 +7,13 @@ open Microsoft.Extensions.Hosting
 open Microsoft.Extensions.DependencyInjection
 open Giraffe
 open ContainerStreaming
+open Microsoft.Extensions.Configuration
 
 type ContainerServiceError = ServiceError of string
 
 type ContainerDto = Database.ContainerEntity
 
 let unwrapServiceError (ServiceError e) = "ServiceError(" + e + ")"
-
 
 type ContainerService() =
     member _.lock: SemaphoreSlim = new SemaphoreSlim(1)
@@ -37,30 +37,18 @@ type ContainerService() =
                             | Error e -> Error(ServiceError e.Message)
 
                 finally
-                    printfn "Releasing lock"
-                    let count = cs.lock.Release()
-
-                    printfn "Released lock: %d" count
+                    cs.lock.Release() |> ignore
             else
                 printfn "Failed to acquire lock"
                 return Error(ServiceError "Failed to acquire lock")
         }
 
-
-let client =
-    (new DockerClientConfiguration(Uri("unix:///var/run/docker.sock")))
-        .CreateClient()
-
-let cs = ContainerService()
-let allowedRange = { From = Port 15000; To = Port 15999 }
-
 let containerCreateHandler =
     handleContext (fun ctx ->
+        let cs = ctx.GetService<ContainerService>()
+
         let container =
             ctx.BindJsonAsync<ContainerDto>() |> Async.AwaitTask |> Async.RunSynchronously
-
-        printfn "Creating container %A" container
-
 
         let result = container |> cs.CreateContainer |> Async.RunSynchronously
 
@@ -88,7 +76,15 @@ let configureApp (app: IApplicationBuilder) = app.UseGiraffe webApp
 let configureServices (services: IServiceCollection) =
     services
         .AddGiraffe()
-        .AddHostedService<ReconcileService>(fun _ -> new ReconcileService(500, client))
+        .AddSingleton<ContainerService>()
+        .AddSingleton<DockerClient>(fun sp ->
+            let config =
+                sp.GetRequiredService<IConfiguration>().GetValue<string>("DockerSocket")
+
+            let client = (new DockerClientConfiguration(Uri(config))).CreateClient()
+
+            client)
+        .AddHostedService<ReconcileService>()
     |> ignore
 
     services.AddSingleton<Json.ISerializer>(Json.Serializer(Json.Serializer.DefaultOptions))
@@ -96,17 +92,25 @@ let configureServices (services: IServiceCollection) =
 
 [<EntryPoint>]
 let main _ =
+    let allowedRange = { From = Port 15000; To = Port 15999 }
     let ctks = new CancellationTokenSource()
-    initState client ctks.Token |> Async.AwaitTask |> Async.RunSynchronously
+    let builder = Host.CreateDefaultBuilder()
+
+    let app =
+        builder
+            .ConfigureWebHostDefaults(fun webHostBuilder ->
+                webHostBuilder.Configure(configureApp).ConfigureServices(configureServices)
+                |> ignore)
+            .Build()
+
+    let client = app.Services.GetRequiredService<DockerClient>()
+
+    initializeStateOfTheSystem client ctks.Token
+    |> Async.AwaitTask
+    |> Async.RunSynchronously
+
     listen_to_changes client ctks.Token
 
-    Host
-        .CreateDefaultBuilder()
-        .ConfigureWebHostDefaults(fun webHostBuilder ->
-            webHostBuilder.Configure(configureApp).ConfigureServices(configureServices)
-            |> ignore)
-        .Build()
-        .Run()
-
+    app.Run()
     ctks.Cancel()
     0
