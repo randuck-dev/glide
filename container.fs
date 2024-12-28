@@ -224,7 +224,7 @@ let listen_to_changes (client: DockerClient) ctk =
 type ReconcileService(client: DockerClient, config: IConfiguration) =
   inherit BackgroundService()
 
-  let startContainer ds name ctk =
+  let startContainer (ds: DesiredContainerState) name ctk =
     task {
       printfn "Did not find the desired container in the existing state: %A" name
 
@@ -235,21 +235,21 @@ type ReconcileService(client: DockerClient, config: IConfiguration) =
 
       let hostConfig = HostConfig()
       let portBindings = new Dictionary<string, IList<PortBinding>>()
-      let portBinding = PortBinding()
 
-      portBinding.HostPort <- sprintf "%d" ds.HostPort
-      portBindings.Add(sprintf "%d/tcp" ds.ContainerPort, [| portBinding |])
+      for port in ds.Ports do
+        let portBinding = PortBinding()
+        portBinding.HostPort <- sprintf "%d" port.HostPort
+        portBindings.Add(sprintf "%d/tcp" port.ContainerPort, [| portBinding |])
 
       hostConfig.PortBindings <- portBindings
 
-      let createContainer: CreateContainerParameters = new CreateContainerParameters()
+      let createContainer = new CreateContainerParameters()
       createContainer.Name <- ds.Name
       createContainer.Image <- ds.Image
       createContainer.Labels <- labels
       createContainer.HostConfig <- hostConfig
 
       try
-
         let progressHandler = Progress<JSONMessage>(fun x -> printfn "%A" x.ProgressMessage)
         let imageCreateParams = ImagesCreateParameters()
         imageCreateParams.FromImage <- ds.Image
@@ -276,6 +276,7 @@ type ReconcileService(client: DockerClient, config: IConfiguration) =
       while not ctk.IsCancellationRequested do
         let! _ = periodic.WaitForNextTickAsync(ctk)
 
+        let now = DateTime.Now
         let desiredState = Database.getDesiredState ()
         // we make a copy explicitly
         let state = new Dictionary<ContainerName.ContainerName, ContainerType>(state)
@@ -295,6 +296,7 @@ type ReconcileService(client: DockerClient, config: IConfiguration) =
 
             match state.ContainsKey(name) with
             | true ->
+
               // since we found the container, we just have to diff and check if it's still in the proper state
               danglingContainers <- danglingContainers |> List.filter (fun x -> x.Name <> name)
 

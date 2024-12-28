@@ -87,9 +87,32 @@ let configureServices (services: IServiceCollection) =
     .AddHostedService<ReconcileService>()
   |> ignore
 
+let prerequisites (client: DockerClient) =
+  task {
+    try
+      let info = System.Diagnostics.ProcessStartInfo()
+      info.FileName <- "docker"
+      info.Arguments <- "info --format json"
+      info.RedirectStandardOutput <- true
+      info.RedirectStandardError <- true
+
+      let shell = System.Diagnostics.Process.Start(info)
+
+      do! shell.WaitForExitAsync()
+
+      let content = shell.StandardError.ReadToEnd()
+
+      return
+        match content with
+        | _ when content.StartsWith("Cannot connect") -> Error "Docker is not running"
+        | _ -> Ok()
+    with ex ->
+      return Error ex.Message
+  }
+
 [<EntryPoint>]
 let main _ =
-  async {
+  task {
     let allowedRange = { From = Port 15000; To = Port 15999 }
     let ctks = new CancellationTokenSource()
     let builder = Host.CreateDefaultBuilder()
@@ -102,13 +125,21 @@ let main _ =
         .Build()
 
     let client = app.Services.GetRequiredService<DockerClient>()
+    let! res = prerequisites client
 
-    do! initializeStateOfTheSystem client ctks.Token |> Async.AwaitTask
+    match res with
+    | Error e ->
+      printfn "%s" e
+      return 1
+    | Ok() ->
+      printfn "Docker found"
+      do! initializeStateOfTheSystem client ctks.Token |> Async.AwaitTask
 
-    listen_to_changes client ctks.Token
+      listen_to_changes client ctks.Token
 
-    app.Run()
-    ctks.Cancel()
-    return 0
+      do! app.RunAsync()
+      do! ctks.CancelAsync()
+      return 0
   }
+  |> Async.AwaitTask
   |> Async.RunSynchronously
